@@ -55,11 +55,17 @@ def patch_for_t4(source: str) -> str:
     """Apply source-level patches to make train_gpt.py run on T4."""
     patched = source
 
-    # 1. bfloat16 → float16 everywhere
-    patched = patched.replace("torch.bfloat16", "torch.float16")
-    patched = patched.replace(".bfloat16()", ".half()")
-    patched = patched.replace("G.bfloat16()", "G.half()")
+    # 1. bfloat16 → float16 for autocast and model dtype
+    #    BUT keep Muon's Newton-Schulz in fp32 (fp16 overflows there)
     patched = patched.replace('dtype=torch.bfloat16, enabled=True', 'dtype=torch.float16, enabled=True')
+    patched = patched.replace(").to(device).bfloat16()", ").to(device).half()")
+    # Muon updates_flat buffer — keep fp32 to avoid overflow
+    patched = patched.replace(
+        "updates_flat = torch.zeros(total_params, device=params[0].device, dtype=torch.bfloat16)",
+        "updates_flat = torch.zeros(total_params, device=params[0].device, dtype=torch.float32)",
+    )
+    # Newton-Schulz: keep in fp32 instead of converting to fp16
+    patched = patched.replace("X = G.bfloat16()", "X = G.float()")
 
     # 2. SDP backends: enable math (always works) + mem_efficient, disable flash/cudnn
     patched = patched.replace("enable_flash_sdp(True)", "enable_flash_sdp(False)")
@@ -104,6 +110,48 @@ def patch_for_t4(source: str) -> str:
     patched = patched.replace(
         'if 8 % world_size != 0:\n        raise ValueError(f"WORLD_SIZE={world_size} must divide 8 so grad_accum_steps stays integral")',
         'if 8 % world_size != 0:\n        world_size = 1  # T4: force single GPU',
+    )
+
+    # 7. Add GradScaler for fp16 (required to avoid underflow/overflow)
+    #    Create scaler after device setup
+    patched = patched.replace(
+        "torch.backends.cuda.matmul.allow_tf32 = True",
+        "grad_scaler = torch.amp.GradScaler('cuda')\n    torch.backends.cuda.matmul.allow_tf32 = True",
+    )
+    #    Warmup loop: scale loss and unscale before optimizer step
+    patched = patched.replace(
+        "(warmup_loss * grad_scale).backward()\n"
+        "            for opt in optimizers:\n"
+        "                opt.step()",
+        "grad_scaler.scale(warmup_loss * grad_scale).backward()\n"
+        "            for opt in optimizers:\n"
+        "                grad_scaler.unscale_(opt)\n"
+        "            torch.nn.utils.clip_grad_norm_(base_model.parameters(), 1.0)\n"
+        "            for opt in optimizers:\n"
+        "                grad_scaler.step(opt)\n"
+        "            grad_scaler.update()",
+    )
+    #    Main loop: scale loss
+    patched = patched.replace(
+        "(loss * grad_scale).backward()\n"
+        "        train_loss /= grad_accum_steps",
+        "grad_scaler.scale(loss * grad_scale).backward()\n"
+        "        train_loss /= grad_accum_steps",
+    )
+    #    Main loop: unscale + clip + scaler step
+    patched = patched.replace(
+        "        if args.grad_clip_norm > 0:\n"
+        "            torch.nn.utils.clip_grad_norm_(base_model.parameters(), args.grad_clip_norm)\n"
+        "        for opt in optimizers:\n"
+        "            opt.step()\n"
+        "        zero_grad_all()",
+        "        for opt in optimizers:\n"
+        "            grad_scaler.unscale_(opt)\n"
+        "        torch.nn.utils.clip_grad_norm_(base_model.parameters(), 1.0)\n"
+        "        for opt in optimizers:\n"
+        "            grad_scaler.step(opt)\n"
+        "        grad_scaler.update()\n"
+        "        zero_grad_all()",
     )
 
     return patched
