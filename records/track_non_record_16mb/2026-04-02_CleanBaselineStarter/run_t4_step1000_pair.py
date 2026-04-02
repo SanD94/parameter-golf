@@ -224,6 +224,10 @@ def main() -> None:
     here = Path(__file__).resolve().parent
     repo_root = here.parents[2]
     source_script = here / "train_gpt.py"
+    if not source_script.exists():
+        source_script = repo_root / "train_gpt.py"
+    if not source_script.exists():
+        raise FileNotFoundError("Cannot find train_gpt.py in records folder or repo root")
     out_dir = here / "logs_t4"
 
     if args.compare_only:
