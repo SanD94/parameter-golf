@@ -61,14 +61,34 @@ def patch_for_t4(source: str) -> str:
     patched = patched.replace("G.bfloat16()", "G.half()")
     patched = patched.replace('dtype=torch.bfloat16, enabled=True', 'dtype=torch.float16, enabled=True')
 
-    # 2. Flash SDP → mem_efficient SDP (T4 flash kernel has issues with GQA)
+    # 2. SDP backends: enable math (always works) + mem_efficient, disable flash/cudnn
     patched = patched.replace("enable_flash_sdp(True)", "enable_flash_sdp(False)")
     patched = patched.replace("enable_mem_efficient_sdp(False)", "enable_mem_efficient_sdp(True)")
+    patched = patched.replace("enable_math_sdp(False)", "enable_math_sdp(True)")
 
-    # 3. fused=True → fused=False on Adam (fused not supported on T4)
+    # 3. GQA: T4 backends don't support enable_gqa, so manually repeat KV heads
+    patched = patched.replace(
+        '            y = F.scaled_dot_product_attention(\n'
+        '                q,\n'
+        '                k,\n'
+        '                v,\n'
+        '                attn_mask=None,\n'
+        '                is_causal=True,\n'
+        '                enable_gqa=(self.num_kv_heads != self.num_heads),\n'
+        '            ).transpose(1, 2)',
+        '            if self.num_kv_heads != self.num_heads:\n'
+        '                reps = self.num_heads // self.num_kv_heads\n'
+        '                k = k.repeat_interleave(reps, dim=1)\n'
+        '                v = v.repeat_interleave(reps, dim=1)\n'
+        '            y = F.scaled_dot_product_attention(\n'
+        '                q, k, v, attn_mask=None, is_causal=True,\n'
+        '            ).transpose(1, 2)',
+    )
+
+    # 4. fused=True → fused=False on Adam (fused not supported on T4)
     patched = patched.replace("fused=True", "fused=False")
 
-    # 4. Disable torch.compile (unreliable on T4 / older CUDA)
+    # 5. Disable torch.compile (unreliable on T4 / older CUDA)
     patched = patched.replace(
         "zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)",
         "# zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)  # disabled for T4",
@@ -78,7 +98,7 @@ def patch_for_t4(source: str) -> str:
         "compiled_model = base_model  # torch.compile disabled for T4",
     )
 
-    # 5. Force single-GPU (no torchrun needed)
+    # 6. Force single-GPU (no torchrun needed)
     #    The script already handles non-distributed mode, so we just need to make sure
     #    WORLD_SIZE validation doesn't block us. Patch the divisor check.
     patched = patched.replace(
