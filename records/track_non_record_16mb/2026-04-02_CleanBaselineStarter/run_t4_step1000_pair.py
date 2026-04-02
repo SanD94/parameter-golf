@@ -58,7 +58,8 @@ def patch_for_t4(source: str) -> str:
     # 1. bfloat16 → float16 for autocast and model dtype
     #    BUT keep Muon's Newton-Schulz in fp32 (fp16 overflows there)
     patched = patched.replace('dtype=torch.bfloat16, enabled=True', 'dtype=torch.float16, enabled=True')
-    patched = patched.replace(").to(device).bfloat16()", ").to(device).half()")
+    # Keep model in fp32; autocast handles fp16 compute. GradScaler needs fp32 gradients.
+    patched = patched.replace(").to(device).bfloat16()", ").to(device)")
     # Muon updates_flat buffer — keep fp32 to avoid overflow
     patched = patched.replace(
         "updates_flat = torch.zeros(total_params, device=params[0].device, dtype=torch.bfloat16)",
