@@ -67,7 +67,8 @@ def patch_for_t4(source: str) -> str:
     # Newton-Schulz: keep in fp32 instead of converting to fp16
     patched = patched.replace("X = G.bfloat16()", "X = G.float()")
 
-    # 2. SDP backends: enable math (always works) + mem_efficient, disable flash/cudnn
+    # 2. SDP backends: flash requires SM80+ so disable it; enable cudnn + mem_efficient + math
+    patched = patched.replace("enable_cudnn_sdp(False)", "enable_cudnn_sdp(True)")
     patched = patched.replace("enable_flash_sdp(True)", "enable_flash_sdp(False)")
     patched = patched.replace("enable_mem_efficient_sdp(False)", "enable_mem_efficient_sdp(True)")
     patched = patched.replace("enable_math_sdp(False)", "enable_math_sdp(True)")
@@ -94,15 +95,8 @@ def patch_for_t4(source: str) -> str:
     # 4. fused=True → fused=False on Adam (fused not supported on T4)
     patched = patched.replace("fused=True", "fused=False")
 
-    # 5. Disable torch.compile (unreliable on T4 / older CUDA)
-    patched = patched.replace(
-        "zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)",
-        "# zeropower_via_newtonschulz5 = torch.compile(zeropower_via_newtonschulz5)  # disabled for T4",
-    )
-    patched = patched.replace(
-        "compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)",
-        "compiled_model = base_model  # torch.compile disabled for T4",
-    )
+    # 5. torch.compile — keep enabled, Colab PyTorch 2.x + CUDA 12 supports T4
+    #    (was previously disabled; re-enabled for performance)
 
     # 6. Force single-GPU (no torchrun needed)
     #    The script already handles non-distributed mode, so we just need to make sure
