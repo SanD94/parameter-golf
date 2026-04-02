@@ -120,15 +120,15 @@ def main() -> None:
         description="Run baseline then candidate sequentially (never both in RAM) and compare val_bpb."
     )
     parser.add_argument(
-        "--env", action="append", default=[], metavar="KEY=VALUE",
+        "--env", action="extend", nargs="+", default=[], metavar="KEY=VALUE",
         help="Environment override applied to both runs.",
     )
     parser.add_argument(
-        "--candidate-env", action="append", default=[], metavar="KEY=VALUE",
+        "--candidate-env", action="extend", nargs="+", default=[], metavar="KEY=VALUE",
         help="Environment override applied only to the candidate run.",
     )
     parser.add_argument(
-        "--baseline-env", action="append", default=[], metavar="KEY=VALUE",
+        "--baseline-env", action="extend", nargs="+", default=[], metavar="KEY=VALUE",
         help="Environment override applied only to the baseline run.",
     )
     parser.add_argument("--seed", default="1337", help="Shared seed (default: 1337).")
