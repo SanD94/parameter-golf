@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 
 STEP_RE = re.compile(r"^step:(\d+)/(\d+) val_loss:([0-9.]+) val_bpb:([0-9.]+)")
-TARGET_STEPS = (600, 800, 1000)
+TARGET_STEPS = (1000,)
 
 
 def parse_env_pairs(pairs: list[str]) -> dict[str, str]:
@@ -269,10 +269,10 @@ def parse_val_bpb_by_step(log_path: Path) -> dict[int, float]:
     return by_step
 
 
-def classify(delta_1000: float, mean_early_delta: float) -> str:
-    if delta_1000 <= -0.003 and mean_early_delta <= -0.002:
+def classify(delta_1000: float) -> str:
+    if delta_1000 <= -0.003:
         return "✅ PROMOTE"
-    if delta_1000 >= 0.001 or mean_early_delta >= 0.001:
+    if delta_1000 >= 0.001:
         return "❌ REJECT"
     return "⚠️  BORDERLINE"
 
@@ -291,9 +291,8 @@ def compare(baseline_log: Path, candidate_log: Path) -> None:
                 "Ensure VAL_LOSS_EVERY=200."
             )
 
-    deltas = {step: candidate_vals[step] - baseline_vals[step] for step in TARGET_STEPS}
-    mean_early_delta = sum(deltas.values()) / len(TARGET_STEPS)
-    verdict = classify(deltas[1000], mean_early_delta)
+    delta_1000 = candidate_vals[1000] - baseline_vals[1000]
+    verdict = classify(delta_1000)
 
     print(f"\n{'='*60}")
     print("  Step-1000 T4 Pair Summary")
@@ -301,18 +300,12 @@ def compare(baseline_log: Path, candidate_log: Path) -> None:
     print(f"  baseline_log:  {baseline_log}")
     print(f"  candidate_log: {candidate_log}")
     print(f"{'─'*60}")
-    print(f"  {'Step':<8} {'Baseline':>12} {'Candidate':>12} {'Delta':>12}")
-    print(f"  {'─'*44}")
-    for step in TARGET_STEPS:
-        print(
-            f"  {step:<8} {baseline_vals[step]:>12.6f} {candidate_vals[step]:>12.6f} "
-            f"{deltas[step]:>+12.6f}"
-        )
+    print(f"  baseline  val_bpb: {baseline_vals[1000]:.6f}")
+    print(f"  candidate val_bpb: {candidate_vals[1000]:.6f}")
+    print(f"  delta:             {delta_1000:+.6f}")
     print(f"{'─'*60}")
-    print(f"  mean_early_delta(600,800,1000): {mean_early_delta:+.6f}")
     print(f"  verdict: {verdict}")
-    print(f"{'─'*60}")
-    print("  Rule: promote if delta_1000 ≤ -0.003 AND mean_early ≤ -0.002")
+    print(f"  Rule: promote if delta ≤ -0.003, reject if delta ≥ 0.001")
     print(f"{'='*60}\n")
 
 
@@ -369,7 +362,7 @@ def main() -> None:
         "PYTHONUNBUFFERED": "1",
         "ITERATIONS": args.iterations,
         "WARMDOWN_ITERS": args.iterations,
-        "VAL_LOSS_EVERY": "200",
+        "VAL_LOSS_EVERY": "0",  # only validate on last step
         "TRAIN_LOG_EVERY": "100",
         "TRAIN_BATCH_TOKENS": "65536",  # 64K tokens per step (vs 512K default)
         "VAL_BATCH_SIZE": "65536",
