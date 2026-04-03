@@ -162,7 +162,7 @@ def main() -> None:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # T4-friendly defaults: smaller batches for 16 GB VRAM, tuned for speed
+    # T4-friendly defaults: smaller batches for 16 GB VRAM
     common_env = {
         "SEED": args.seed,
         "OUT_DIR": str(out_dir),
@@ -170,15 +170,12 @@ def main() -> None:
         "ITERATIONS": args.iterations,
         "WARMDOWN_ITERS": args.iterations,
         "VAL_LOSS_EVERY": "0",            # only validate on last step
-        "TRAIN_LOG_EVERY": "200",
+        "TRAIN_LOG_EVERY": "100",
         "TRAIN_BATCH_TOKENS": "65536",     # 64K tokens/step (vs 512K default)
         "VAL_BATCH_SIZE": "65536",
-        "WARMUP_STEPS": "0",              # no compile = no warmup needed
+        "WARMUP_STEPS": "5",
         "MAX_WALLCLOCK_SECONDS": "0",      # no wallclock cap, use iterations
         "ATTENTION_BACKEND": "sdpa",       # force SDPA, no flash_attn_3
-        "CHECKPOINT_EVERY": "0",           # no mid-run checkpoints for pair runs
-        "GRAD_ACCUM_STEPS": "4",           # fewer micro-steps, same total tokens
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
     common_env.update(parse_env_pairs(args.env))
 
