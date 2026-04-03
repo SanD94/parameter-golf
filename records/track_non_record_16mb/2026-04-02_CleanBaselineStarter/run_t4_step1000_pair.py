@@ -107,7 +107,66 @@ def patch_for_t4(source: str) -> str:
         'if 8 % world_size != 0:\n        world_size = 1  # T4: force single GPU',
     )
 
-    # 7. Add GradScaler for fp16 (required to avoid underflow/overflow)
+    # 7. Checkpoint system for resuming interrupted training
+    #    Add config vars to Hyperparameters
+    patched = patched.replace(
+        '    seed = int(os.environ.get("SEED", 1337))',
+        '    seed = int(os.environ.get("SEED", 1337))\n'
+        '    checkpoint_every = int(os.environ.get("CHECKPOINT_EVERY", 200))\n'
+        '    checkpoint_dir = os.environ.get("CHECKPOINT_DIR", "")',
+    )
+    #    Inject checkpoint load before the training loop
+    patched = patched.replace(
+        '    training_time_ms = 0.0\n'
+        '    stop_after_step: int | None = None\n'
+        '    torch.cuda.synchronize()\n'
+        '    t0 = time.perf_counter()\n'
+        '\n'
+        '    step = 0',
+        '    training_time_ms = 0.0\n'
+        '    stop_after_step: int | None = None\n'
+        '    step = 0\n'
+        '    # --- Checkpoint: attempt resume ---\n'
+        '    _ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else Path(os.environ.get("OUT_DIR", "logs")) / "checkpoints"\n'
+        '    _ckpt_path = _ckpt_dir / f"{args.run_id}_ckpt.pt"\n'
+        '    if _ckpt_path.exists():\n'
+        '        _ckpt = torch.load(_ckpt_path, map_location=device, weights_only=False)\n'
+        '        base_model.load_state_dict(_ckpt["model"])\n'
+        '        for _i, _opt in enumerate(optimizers):\n'
+        '            _opt.load_state_dict(_ckpt["optimizers"][_i])\n'
+        '        step = _ckpt["step"]\n'
+        '        training_time_ms = _ckpt["training_time_ms"]\n'
+        '        if "grad_scaler" in _ckpt:\n'
+        '            grad_scaler.load_state_dict(_ckpt["grad_scaler"])\n'
+        '        # Fast-forward the data loader\n'
+        '        for _ in range(step * grad_accum_steps):\n'
+        '            train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)\n'
+        '        log0(f"checkpoint:resumed from step {step} (training_time:{training_time_ms:.0f}ms)")\n'
+        '        del _ckpt\n'
+        '    torch.cuda.synchronize()\n'
+        '    t0 = time.perf_counter()',
+    )
+    #    Inject checkpoint save after step logging
+    patched = patched.replace(
+        '        # Needed to sync whether we\'ve reached the wallclock cap.',
+        '        # --- Checkpoint: periodic save ---\n'
+        '        if args.checkpoint_every > 0 and step % args.checkpoint_every == 0:\n'
+        '            _ckpt_dir.mkdir(parents=True, exist_ok=True)\n'
+        '            _ckpt_save = {\n'
+        '                "step": step,\n'
+        '                "model": base_model.state_dict(),\n'
+        '                "optimizers": [_opt.state_dict() for _opt in optimizers],\n'
+        '                "training_time_ms": training_time_ms + 1000.0 * (time.perf_counter() - t0),\n'
+        '                "grad_scaler": grad_scaler.state_dict() if "grad_scaler" in dir() else {},\n'
+        '            }\n'
+        '            torch.save(_ckpt_save, _ckpt_path)\n'
+        '            del _ckpt_save\n'
+        '            log0(f"checkpoint:saved at step {step} to {_ckpt_path}")\n'
+        '\n'
+        '        # Needed to sync whether we\'ve reached the wallclock cap.',
+    )
+
+    # 8. Add GradScaler for fp16 (required to avoid underflow/overflow)
     #    Create scaler after device setup
     patched = patched.replace(
         "torch.backends.cuda.matmul.allow_tf32 = True",
