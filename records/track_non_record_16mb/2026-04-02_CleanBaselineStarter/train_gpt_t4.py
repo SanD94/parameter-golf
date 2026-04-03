@@ -823,7 +823,7 @@ def main() -> None:
     grad_scaler = torch.amp.GradScaler('cuda', init_scale=2**12, growth_interval=128)
     torch.backends.cuda.matmul.allow_tf32 = False  # no-op on T4, be explicit
     torch.backends.cudnn.allow_tf32 = False         # no-op on T4
-    torch.backends.cudnn.benchmark = True            # fixed shapes, safe to auto-tune
+    torch.backends.cudnn.benchmark = False           # auto-tune overhead too costly for 1000 steps
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
 
     enable_cudnn_sdp(False)   # cuDNN SDPA is not efficient on T4/SM75
