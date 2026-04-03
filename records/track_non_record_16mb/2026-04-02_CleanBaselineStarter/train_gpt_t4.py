@@ -808,7 +808,7 @@ def main() -> None:
         raise ValueError(f"WORLD_SIZE must be positive, got {world_size}")
     if 8 % world_size != 0:
         world_size = 1  # T4: force single GPU
-    grad_accum_steps = 8 // world_size
+    grad_accum_steps = int(os.environ.get("GRAD_ACCUM_STEPS", 8 // world_size))
     grad_scale = 1.0 / grad_accum_steps
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
@@ -819,40 +819,42 @@ def main() -> None:
         dist.barrier()
     master_process = rank == 0
 
-    # Fast math knobs
-    grad_scaler = torch.amp.GradScaler('cuda')
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    # Fast math knobs (T4/SM75 has no TF32 or BF16 Tensor Cores)
+    grad_scaler = torch.amp.GradScaler('cuda', init_scale=2**12, growth_interval=128)
+    torch.backends.cuda.matmul.allow_tf32 = False  # no-op on T4, be explicit
+    torch.backends.cudnn.allow_tf32 = False         # no-op on T4
+    torch.backends.cudnn.benchmark = True            # fixed shapes, safe to auto-tune
     from torch.backends.cuda import enable_cudnn_sdp, enable_flash_sdp, enable_math_sdp, enable_mem_efficient_sdp
 
-    enable_cudnn_sdp(True)
-    enable_flash_sdp(False)
+    enable_cudnn_sdp(False)   # cuDNN SDPA is not efficient on T4/SM75
+    enable_flash_sdp(False)   # flash requires SM80+
     enable_mem_efficient_sdp(True)
     enable_math_sdp(True)
 
-    logfile = None
+    logfh = None
     if master_process:
         os.makedirs("logs", exist_ok=True)
         logfile = f"logs/{args.run_id}.txt"
         print(logfile)
+        logfh = open(logfile, "a", encoding="utf-8", buffering=1)
 
     def log0(msg: str, console: bool = True) -> None:
         if not master_process:
             return
         if console:
             print(msg)
-        if logfile is not None:
-            with open(logfile, "a", encoding="utf-8") as f:
-                print(msg, file=f)
+        if logfh is not None:
+            print(msg, file=logfh)
 
     log0(code, console=False)
     log0("=" * 100, console=False)
     log0(f"Running Python {sys.version}", console=False)
     log0(f"Running PyTorch {torch.__version__}", console=False)
-    log0(
-        subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False).stdout,
-        console=False,
-    )
+    if os.environ.get("LOG_NVIDIA_SMI", "0") == "1":
+        log0(
+            subprocess.run(["nvidia-smi"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False).stdout,
+            console=False,
+        )
     log0("=" * 100, console=False)
 
     # -----------------------------
@@ -905,7 +907,12 @@ def main() -> None:
         if isinstance(module, CastedLinear):
             module.float()
     restore_low_dim_params_to_fp32(base_model)
-    compiled_model = torch.compile(base_model, dynamic=False, fullgraph=True)
+    compile_mode = os.environ.get("COMPILE_MODE", "reduce-overhead")
+    use_compile = bool(int(os.environ.get("USE_COMPILE", "0")))  # off by default on T4; compile overhead rarely pays back in 1000 steps
+    compiled_model = (
+        torch.compile(base_model, dynamic=False, fullgraph=False, mode=compile_mode)
+        if use_compile else base_model
+    )
     model: nn.Module = DDP(compiled_model, device_ids=[local_rank], broadcast_buffers=False) if distributed else compiled_model
 
     # Optimizer split:
@@ -1225,6 +1232,9 @@ def main() -> None:
         f"eval_time:{1000.0 * (time.perf_counter() - t_qeval):.0f}ms"
     )
     log0(f"final_int8_zlib_roundtrip_exact val_loss:{q_val_loss:.8f} val_bpb:{q_val_bpb:.8f}")
+
+    if logfh is not None:
+        logfh.close()
 
     if distributed:
         dist.destroy_process_group()
